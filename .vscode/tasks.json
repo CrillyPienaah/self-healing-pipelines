@@ -1,0 +1,37 @@
+﻿{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run FastAPI Dev Server",
+      "type": "shell",
+      "command": "python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "pytest tests/ -v --cov=src --cov-report=html",
+      "problemMatcher": [],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Format Code",
+      "type": "shell",
+      "command": "black src/ tests/ && isort src/ tests/",
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint Code",
+      "type": "shell",
+      "command": "flake8 src/ tests/",
+      "problemMatcher": []
+    }
+  ]
+}

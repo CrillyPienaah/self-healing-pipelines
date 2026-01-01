@@ -1,0 +1,15 @@
+﻿{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.black-formatter",
+    "ms-azuretools.vscode-docker",
+    "github.copilot",
+    "eamodio.gitlens",
+    "rangav.vscode-thunder-client",
+    "esbenp.prettier-vscode",
+    "usernamehm.errorlens",
+    "ms-toolsai.jupyter",
+    "bierner.markdown-mermaid"
+  ]
+}
