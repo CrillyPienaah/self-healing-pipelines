@@ -1,6 +1,7 @@
 ﻿from fastapi import FastAPI, HTTPException
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
+from pydantic import BaseModel
 import hashlib
 import json
 
@@ -10,13 +11,24 @@ app = FastAPI(
     description='AI-native platform for autonomous data pipeline remediation'
 )
 
-# In-memory storage (will replace with database later)
+# In-memory storage
 pipelines_db = {}
 snapshots_db = {}
 anomalies_db = {}
 next_pipeline_id = 1
 next_snapshot_id = 1
 next_anomaly_id = 1
+
+
+# Pydantic models for request validation
+class ColumnInfo(BaseModel):
+    name: str
+    type: str
+
+
+class SnapshotRequest(BaseModel):
+    columns: List[ColumnInfo]
+    row_count: Optional[int] = None
 
 
 @app.get('/')
@@ -42,7 +54,6 @@ async def create_pipeline(
     '''Register a new pipeline for monitoring'''
     global next_pipeline_id
     
-    # Check if pipeline already exists
     for pid, pipeline in pipelines_db.items():
         if pipeline['name'] == name:
             raise HTTPException(status_code=400, detail='Pipeline already exists')
@@ -76,15 +87,16 @@ async def list_pipelines():
 @app.post('/api/v1/pipelines/{pipeline_id}/snapshots')
 async def record_snapshot(
     pipeline_id: int,
-    columns: List[dict],
-    row_count: Optional[int] = None
+    snapshot: SnapshotRequest
 ):
     '''Record a schema snapshot for drift detection'''
     global next_snapshot_id, next_anomaly_id
     
-    # Verify pipeline exists
     if pipeline_id not in pipelines_db:
         raise HTTPException(status_code=404, detail='Pipeline not found')
+    
+    # Convert Pydantic models to dicts
+    columns = [col.dict() for col in snapshot.columns]
     
     # Calculate schema hash
     schema_str = json.dumps(columns, sort_keys=True)
@@ -99,7 +111,6 @@ async def record_snapshot(
         if latest_snapshot['schema_hash'] != schema_hash:
             drift_detected = True
             
-            # Create anomaly record
             anomaly = {
                 'id': next_anomaly_id,
                 'pipeline_id': pipeline_id,
@@ -117,22 +128,22 @@ async def record_snapshot(
             next_anomaly_id += 1
     
     # Save snapshot
-    snapshot = {
+    snapshot_record = {
         'id': next_snapshot_id,
         'pipeline_id': pipeline_id,
         'schema_hash': schema_hash,
         'columns': columns,
-        'row_count': row_count,
+        'row_count': snapshot.row_count,
         'snapshot_time': datetime.utcnow().isoformat()
     }
-    snapshots_db[pipeline_id].append(snapshot)
+    snapshots_db[pipeline_id].append(snapshot_record)
     next_snapshot_id += 1
     
     return {
-        'snapshot_id': snapshot['id'],
+        'snapshot_id': snapshot_record['id'],
         'schema_hash': schema_hash,
         'drift_detected': drift_detected,
-        'snapshot_time': snapshot['snapshot_time']
+        'snapshot_time': snapshot_record['snapshot_time']
     }
 
 
