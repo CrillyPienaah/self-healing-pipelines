@@ -1,4 +1,5 @@
 ﻿from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 from datetime import datetime
 from pydantic import BaseModel
@@ -16,8 +17,20 @@ except Exception as e:
 
 app = FastAPI(
     title='Self-Healing Pipelines API',
-    version='0.2.0',
+    version='0.3.0',
     description='AI-native platform for autonomous data pipeline remediation'
+)
+
+# Enable CORS for React dashboard
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        'http://localhost:5173',  # Vite dev server
+        'http://localhost:3000',   # Alternative port
+    ],
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
 )
 
 # In-memory storage
@@ -47,7 +60,7 @@ async def root():
     return {
         'message': 'Self-Healing Pipeline Platform API',
         'status': 'ok',
-        'version': '0.2.0',
+        'version': '0.3.0',
         'features': {
             'schema_drift_detection': True,
             'llm_fix_generation': fix_generator is not None
@@ -59,7 +72,7 @@ async def root():
 async def health_check():
     return {
         'status': 'healthy',
-        'version': '0.2.0',
+        'version': '0.3.0',
         'llm_available': fix_generator is not None
     }
 
@@ -200,11 +213,11 @@ async def get_snapshots(pipeline_id: int, limit: int = 10):
     }
 
 
-# ============= LLM FIX GENERATION ENDPOINTS =============
+# LLM FIX GENERATION ENDPOINTS
 
 @app.post('/api/v1/anomalies/{anomaly_id}/propose-fix')
 async def propose_fix(anomaly_id: int):
-    '''Generate a fix proposal for an anomaly using GPT-4'''
+    '''Generate a fix proposal using GPT-4'''
     global next_fix_id
     
     if not fix_generator:
@@ -213,7 +226,6 @@ async def propose_fix(anomaly_id: int):
             detail='Fix generation unavailable. OpenAI API key not configured.'
         )
     
-    # Find the anomaly
     anomaly = None
     for pipeline_id in anomalies_db:
         for a in anomalies_db[pipeline_id]:
@@ -226,11 +238,9 @@ async def propose_fix(anomaly_id: int):
     if not anomaly:
         raise HTTPException(status_code=404, detail='Anomaly not found')
     
-    # Generate fix using GPT-4
     try:
         fix_proposal = fix_generator.generate_schema_drift_fix(anomaly)
         
-        # Store fix
         fix_record = {
             'id': next_fix_id,
             'anomaly_id': anomaly_id,
@@ -251,24 +261,18 @@ async def propose_fix(anomaly_id: int):
         return fix_record
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f'Fix generation failed: {str(e)}'
-        )
+        raise HTTPException(status_code=500, detail=f'Fix generation failed: {str(e)}')
 
 
 @app.get('/api/v1/fixes/{fix_id}')
 async def get_fix(fix_id: int):
-    '''Get details of a proposed fix'''
     if fix_id not in fixes_db:
         raise HTTPException(status_code=404, detail='Fix not found')
-    
     return fixes_db[fix_id]
 
 
 @app.post('/api/v1/fixes/{fix_id}/approve')
 async def approve_fix(fix_id: int):
-    '''Approve a proposed fix'''
     if fix_id not in fixes_db:
         raise HTTPException(status_code=404, detail='Fix not found')
     
@@ -279,14 +283,12 @@ async def approve_fix(fix_id: int):
     return {
         'message': 'Fix approved successfully',
         'fix_id': fix_id,
-        'status': 'approved',
-        'next_step': 'Apply fix to production pipeline'
+        'status': 'approved'
     }
 
 
 @app.post('/api/v1/fixes/{fix_id}/reject')
 async def reject_fix(fix_id: int, reason: Optional[str] = None):
-    '''Reject a proposed fix'''
     if fix_id not in fixes_db:
         raise HTTPException(status_code=404, detail='Fix not found')
     
@@ -298,16 +300,13 @@ async def reject_fix(fix_id: int, reason: Optional[str] = None):
     return {
         'message': 'Fix rejected',
         'fix_id': fix_id,
-        'status': 'rejected',
-        'reason': reason
+        'status': 'rejected'
     }
 
 
 @app.get('/api/v1/anomalies/{anomaly_id}/fixes')
 async def get_fixes_for_anomaly(anomaly_id: int):
-    '''Get all fix proposals for an anomaly'''
     fixes = [fix for fix in fixes_db.values() if fix['anomaly_id'] == anomaly_id]
-    
     return {
         'fixes': fixes,
         'count': len(fixes)

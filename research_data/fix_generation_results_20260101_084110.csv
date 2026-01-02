@@ -1,0 +1,22 @@
+scenario,old_cols,new_cols,cols_added,gen_time,confidence,root_cause,fix_length,timestamp
+add_timestamp_column,2,3,1,9.18,90,The schema drift was caused by the addition of a new column 'created_at' in the data source.,422,2026-01-01T08:41:34.269029
+add_foreign_key,2,3,1,12.38,90,The schema drift was caused by the addition of a new column named 'customer_id' to the existing tabl,318,2026-01-01T08:41:55.797664
+add_boolean_flag,2,3,1,6.94,90,The schema drift was caused by the addition of a new column 'is_active' in the data source.,125,2026-01-01T08:42:11.897148
+add_currency_support,2,3,1,10.66,90,The schema drift was caused by the addition of a new column named 'currency' to the existing table.,294,2026-01-01T08:42:31.726858
+add_audit_fields,2,4,2,5.39,90,"The schema drift was caused by the addition of two new columns, 'created_at' and 'updated_at', to th",165,2026-01-01T08:42:46.296841
+remove_deprecated_column,3,2,-1,7.23,80,The schema drift was caused by the removal of the 'legacy_field' column from the data source.,291,2026-01-01T08:43:02.708477
+add_shipping_address,2,3,1,5.65,95,The schema drift was caused by the addition of a new column named 'shipping_address' in the data sou,166,2026-01-01T08:43:17.558812
+add_payment_method,2,3,1,6.65,90,The schema drift was caused by the addition of a new column 'payment_method' in the data source.,255,2026-01-01T08:43:33.358864
+add_user_segments,2,3,1,6.99,90,The schema drift was caused by the addition of a new column named 'segment' in the data source.,298,2026-01-01T08:43:49.496210
+add_integer_field,2,3,1,8.9,90,The schema drift was caused by the addition of a new column named 'new_integer'.,283,2026-01-01T08:44:07.551685
+add_varchar_field,2,3,1,5.48,90,The schema drift was caused by the addition of a new column named 'new_varchar'.,59,2026-01-01T08:44:22.187947
+add_decimal_field,2,3,1,9.13,90,The schema drift was caused by the addition of a new column named 'new_decimal' to the existing tabl,197,2026-01-01T08:44:40.448929
+add_boolean_field,2,3,1,6.3,90,The schema drift was caused by the addition of a new column named 'new_boolean' in the data source.,179,2026-01-01T08:44:55.923049
+add_timestamp_field,2,3,1,7.38,90,The schema drift was caused by the addition of a new column named 'new_timestamp' to the existing ta,331,2026-01-01T08:45:12.493870
+add_date_field,2,3,1,6.89,90,The schema drift was caused by the addition of a new column named 'new_date' to the existing databas,318,2026-01-01T08:45:28.549664
+add_text_field,2,3,1,7.81,90,The schema drift was caused by the addition of a new column named 'new_text' to the existing table.,327,2026-01-01T08:45:45.514898
+add_json_field,2,3,1,9.33,90,The schema drift was caused by the addition of a new column named 'new_json' in the data source.,382,2026-01-01T08:46:04.015060
+add_2_columns,1,3,2,6.41,90,"The schema drift was caused by the addition of two new columns, col_0 and col_1, to the existing tab",288,2026-01-01T08:46:19.579348
+add_3_columns,1,4,3,6.84,90,"The schema drift is caused by the addition of new columns (col_0, col_1, col_2) to the existing tabl",329,2026-01-01T08:46:35.541391
+add_4_columns,1,5,4,7.42,90,"The schema drift is caused by the addition of new columns (col_0, col_1, col_2, col_3) to the existi",295,2026-01-01T08:46:52.119191
+add_5_columns,1,6,5,9.35,90,"The schema drift was caused by the addition of new columns (col_0, col_1, col_2, col_3, col_4) to th",398,2026-01-01T08:47:10.633212
