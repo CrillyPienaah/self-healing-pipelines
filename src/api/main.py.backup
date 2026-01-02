@@ -15,15 +15,6 @@ except Exception as e:
     print(f' Fix Generator initialization failed: {e}')
     fix_generator = None
 
-# Import multi-agent orchestrator
-try:
-    from src.agents.orchestrator import AgentOrchestrator
-    orchestrator = AgentOrchestrator()
-    print(' Multi-Agent Orchestrator initialized successfully')
-except Exception as e:
-    print(f'⚠ Multi-Agent Orchestrator initialization failed: {e}')
-    orchestrator = None
-
 app = FastAPI(
     title='Self-Healing Pipelines API',
     version='0.3.0',
@@ -319,100 +310,4 @@ async def get_fixes_for_anomaly(anomaly_id: int):
     return {
         'fixes': fixes,
         'count': len(fixes)
-    }
-
-
-
-# ============= MULTI-AGENT ANALYSIS ENDPOINT =============
-
-@app.post('/api/v1/anomalies/{anomaly_id}/analyze-multi-agent')
-async def analyze_with_multi_agent(anomaly_id: int):
-    '''
-    Full multi-agent analysis: Detective  Fixer  Critic
-    Returns comprehensive analysis with all agent outputs
-    '''
-    global next_fix_id
-    
-    if not orchestrator:
-        raise HTTPException(
-            status_code=503,
-            detail='Multi-agent system unavailable. Check configuration.'
-        )
-    
-    # Find anomaly
-    anomaly = None
-    pipeline_id = None
-    for pid in anomalies_db:
-        for a in anomalies_db[pid]:
-            if a['id'] == anomaly_id:
-                anomaly = a
-                pipeline_id = pid
-                break
-        if anomaly:
-            break
-    
-    if not anomaly:
-        raise HTTPException(status_code=404, detail='Anomaly not found')
-    
-    # Get past fixes for this pipeline (for RAG)
-    past_fixes = []
-    for pid in anomalies_db:
-        for past_anomaly in anomalies_db[pid]:
-            anomaly_fixes = [f for f in fixes_db.values() if f['anomaly_id'] == past_anomaly['id']]
-            if anomaly_fixes:
-                past_fixes.append({
-                    'anomaly': past_anomaly,
-                    'fix': anomaly_fixes[0]
-                })
-    
-    try:
-        # Run full multi-agent workflow
-        result = orchestrator.process_anomaly(anomaly, past_fixes)
-        
-        # If agents recommend proceeding, store the fix
-        if result.get('proceed_with_fix') and result.get('proposed_fix'):
-            fix_data = result['proposed_fix']
-            
-            fix_record = {
-                'id': next_fix_id,
-                'anomaly_id': anomaly_id,
-                'proposed_at': datetime.utcnow().isoformat(),
-                'fix_type': fix_data['fix_type'],
-                'root_cause': fix_data['root_cause'],
-                'fix_code': fix_data['fix_code'],
-                'rollback_plan': fix_data['rollback_plan'],
-                'confidence_score': fix_data['confidence_score'],
-                'risks': fix_data['risks'],
-                'status': 'pending',
-                'applied_at': None,
-                # Multi-agent metadata
-                'detective_analysis': result.get('detective_analysis'),
-                'critic_validation': result.get('critic_validation'),
-                'final_recommendation': result.get('final_recommendation'),
-                'agent_consensus': result.get('agent_consensus')
-            }
-            
-            fixes_db[next_fix_id] = fix_record
-            next_fix_id += 1
-            
-            result['fix_id'] = fix_record['id']
-        
-        return result
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f'Multi-agent analysis failed: {str(e)}'
-        )
-
-
-@app.get('/api/v1/system/agents/status')
-async def get_agent_status():
-    '''Check status of all agents in the system'''
-    return {
-        'detective_available': orchestrator is not None,
-        'fixer_available': fix_generator is not None,
-        'critic_available': orchestrator is not None,
-        'orchestrator_available': orchestrator is not None,
-        'multi_agent_enabled': orchestrator is not None and fix_generator is not None
     }
