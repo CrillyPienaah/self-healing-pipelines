@@ -43,6 +43,40 @@ export interface Fix {
   applied_at: string | null;
 }
 
+export interface DetectiveAnalysis {
+  root_cause: string;
+  trigger: string;
+  intentional: string;
+  urgency: string;
+  downstream_impact: string;
+  recommended_action: string;
+  reasoning: string;
+}
+
+export interface CriticValidation {
+  syntax_valid: string;
+  logic_sound: string;
+  side_effects: string;
+  safety_score: number;
+  recommendation: string;
+  concerns: string;
+  reasoning: string;
+}
+
+export interface MultiAgentResult {
+  proceed_with_fix: boolean;
+  detective_analysis: DetectiveAnalysis;
+  proposed_fix: Fix;
+  critic_validation: CriticValidation;
+  final_recommendation: string;
+  agent_consensus: {
+    all_agents_agree: boolean;
+    detective_recommends_action: boolean;
+    fixer_confident: boolean;
+    critic_approves: boolean;
+  };
+}
+
 export const healthCheck = async () => {
   const { data } = await api.get('/health');
   return data;
@@ -65,6 +99,12 @@ export const proposeFix = async (anomalyId: number) => {
   return data;
 };
 
+// NEW: Multi-agent analysis endpoint
+export const analyzeWithMultiAgent = async (anomalyId: number) => {
+  const { data } = await api.post<MultiAgentResult>(`/api/v1/anomalies/${anomalyId}/analyze-multi-agent`);
+  return data;
+};
+
 export const approveFix = async (fixId: number) => {
   const { data } = await api.post(`/api/v1/fixes/${fixId}/approve`);
   return data;
@@ -77,5 +117,10 @@ export const rejectFix = async (fixId: number, reason?: string) => {
 
 export const getFixesForAnomaly = async (anomalyId: number) => {
   const { data } = await api.get(`/api/v1/anomalies/${anomalyId}/fixes`);
+  return data;
+};
+
+export const getAgentStatus = async () => {
+  const { data } = await api.get('/api/v1/system/agents/status');
   return data;
 };
