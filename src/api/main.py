@@ -1,10 +1,15 @@
-﻿from fastapi import FastAPI, HTTPException
+﻿from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 import hashlib
 import json
+
+# Database imports
+from src.db.database import get_db, engine
+from src.db import models, crud
 
 # Import anomaly detectors
 from src.monitoring.null_spike_detector import NullSpikeDetector
@@ -34,33 +39,23 @@ except Exception as e:
     print(f'⚠ Multi-Agent Orchestrator initialization failed: {e}')
     orchestrator = None
 
+# Create tables on startup
+models.Base.metadata.create_all(bind=engine)
+
 app = FastAPI(
     title='Self-Healing Pipelines API',
-    version='0.5.0',
-    description='AI-native platform for autonomous data pipeline remediation'
+    version='0.6.0',
+    description='AI-native platform for autonomous data pipeline remediation with PostgreSQL persistence'
 )
 
-# Enable CORS for React dashboard
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        'http://localhost:5173',
-        'http://localhost:3000',
-    ],
+    allow_origins=['http://localhost:5173', 'http://localhost:3000'],
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
 )
-
-# In-memory storage
-pipelines_db = {}
-snapshots_db = {}
-anomalies_db = {}
-fixes_db = {}
-next_pipeline_id = 1
-next_snapshot_id = 1
-next_anomaly_id = 1
-next_fix_id = 1
 
 
 # Pydantic models
@@ -87,12 +82,20 @@ class QualitySnapshotRequest(BaseModel):
     sample_data: Optional[Dict[str, List[Any]]] = None
 
 
+# Helper to convert SQLAlchemy model to dict
+def model_to_dict(obj):
+    if obj is None:
+        return None
+    return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+
+
 @app.get('/')
 async def root():
     return {
         'message': 'Self-Healing Pipeline Platform API',
         'status': 'ok',
-        'version': '0.5.0',
+        'version': '0.6.0',
+        'persistence': 'postgresql',
         'features': {
             'schema_drift_detection': True,
             'null_spike_detection': True,
@@ -108,7 +111,8 @@ async def root():
 async def health_check():
     return {
         'status': 'healthy',
-        'version': '0.5.0',
+        'version': '0.6.0',
+        'database': 'postgresql',
         'llm_available': fix_generator is not None,
         'multi_agent_available': orchestrator is not None,
         'detectors_count': 4
@@ -116,334 +120,254 @@ async def health_check():
 
 
 @app.post('/api/v1/pipelines')
-async def create_pipeline(
+async def create_pipeline_endpoint(
     name: str,
     description: Optional[str] = None,
-    source_type: str = 'dbt'
+    source_type: str = 'dbt',
+    db: Session = Depends(get_db)
 ):
-    global next_pipeline_id
+    # Check if exists
+    existing = crud.get_pipeline_by_name(db, name)
+    if existing:
+        raise HTTPException(status_code=400, detail='Pipeline already exists')
     
-    for pid, pipeline in pipelines_db.items():
-        if pipeline['name'] == name:
-            raise HTTPException(status_code=400, detail='Pipeline already exists')
+    pipeline = crud.create_pipeline(db, name, description, source_type)
     
-    pipeline_id = next_pipeline_id
-    pipeline = {
-        'id': pipeline_id,
-        'name': name,
-        'description': description,
-        'source_type': source_type,
-        'created_at': datetime.utcnow().isoformat()
-    }
+    # Audit log
+    crud.create_audit_log(
+        db, 'create_pipeline', 'pipeline', pipeline.id,
+        {'name': name, 'source_type': source_type}
+    )
     
-    pipelines_db[pipeline_id] = pipeline
-    snapshots_db[pipeline_id] = []
-    anomalies_db[pipeline_id] = []
-    next_pipeline_id += 1
-    
-    return pipeline
+    return model_to_dict(pipeline)
 
 
 @app.get('/api/v1/pipelines')
-async def list_pipelines():
+async def list_pipelines(db: Session = Depends(get_db)):
+    pipelines = crud.get_all_pipelines(db)
     return {
-        'pipelines': list(pipelines_db.values()),
-        'count': len(pipelines_db)
+        'pipelines': [model_to_dict(p) for p in pipelines],
+        'count': len(pipelines)
     }
 
 
 @app.post('/api/v1/pipelines/{pipeline_id}/snapshots')
 async def record_snapshot(
     pipeline_id: int,
-    snapshot: SnapshotRequest
+    snapshot: SnapshotRequest,
+    db: Session = Depends(get_db)
 ):
-    global next_snapshot_id, next_anomaly_id
-    
-    if pipeline_id not in pipelines_db:
+    pipeline = crud.get_pipeline(db, pipeline_id)
+    if not pipeline:
         raise HTTPException(status_code=404, detail='Pipeline not found')
     
     columns = [col.dict() for col in snapshot.columns]
-    
     schema_str = json.dumps(columns, sort_keys=True)
     schema_hash = hashlib.sha256(schema_str.encode()).hexdigest()
     
     drift_detected = False
-    snapshots = snapshots_db[pipeline_id]
+    latest = crud.get_latest_snapshot(db, pipeline_id)
     
-    if snapshots:
-        latest_snapshot = snapshots[-1]
-        if latest_snapshot['schema_hash'] != schema_hash:
-            drift_detected = True
-            
-            old_col_count = len(latest_snapshot['columns'])
-            new_col_count = len(columns)
-            description = f'Schema changed from {old_col_count} to {new_col_count} columns'
-            
-            anomaly = {
-                'id': next_anomaly_id,
-                'pipeline_id': pipeline_id,
-                'type': 'schema_drift',
-                'severity': 'medium',
-                'description': description,
-                'detected_at': datetime.utcnow().isoformat(),
-                'resolved': None,
-                'details': {
-                    'old_columns': latest_snapshot['columns'],
-                    'new_columns': columns
-                }
-            }
-            anomalies_db[pipeline_id].append(anomaly)
-            next_anomaly_id += 1
+    if latest and latest.schema_hash != schema_hash:
+        drift_detected = True
+        old_count = len(latest.columns)
+        new_count = len(columns)
+        
+        # Create anomaly
+        crud.create_anomaly(
+            db, pipeline_id, 'schema_drift', 'medium',
+            f'Schema changed from {old_count} to {new_count} columns',
+            {'old_columns': latest.columns, 'new_columns': columns}
+        )
     
-    snapshot_record = {
-        'id': next_snapshot_id,
-        'pipeline_id': pipeline_id,
-        'schema_hash': schema_hash,
-        'columns': columns,
-        'row_count': snapshot.row_count,
-        'snapshot_time': datetime.utcnow().isoformat()
-    }
-    snapshots_db[pipeline_id].append(snapshot_record)
-    next_snapshot_id += 1
+    # Create snapshot
+    snapshot_record = crud.create_snapshot(
+        db, pipeline_id, schema_hash, columns, snapshot.row_count
+    )
     
     return {
-        'snapshot_id': snapshot_record['id'],
+        'snapshot_id': snapshot_record.id,
         'schema_hash': schema_hash,
         'drift_detected': drift_detected,
-        'snapshot_time': snapshot_record['snapshot_time']
+        'snapshot_time': snapshot_record.snapshot_time.isoformat()
     }
 
 
 @app.post('/api/v1/pipelines/{pipeline_id}/snapshots/quality')
 async def record_quality_snapshot(
     pipeline_id: int,
-    snapshot: QualitySnapshotRequest
+    snapshot: QualitySnapshotRequest,
+    db: Session = Depends(get_db)
 ):
-    '''
-    Enhanced snapshot with all 4 anomaly types:
-    1. Schema drift
-    2. Null spikes
-    3. Row count anomalies
-    4. Type mismatches
-    '''
-    global next_snapshot_id, next_anomaly_id
-    
-    if pipeline_id not in pipelines_db:
+    pipeline = crud.get_pipeline(db, pipeline_id)
+    if not pipeline:
         raise HTTPException(status_code=404, detail='Pipeline not found')
     
     columns = [col.dict() for col in snapshot.columns]
     detected_anomalies = []
     
-    snapshots = snapshots_db[pipeline_id]
-    
-    # 1. SCHEMA DRIFT
+    # Schema drift
     schema_str = json.dumps(columns, sort_keys=True)
     schema_hash = hashlib.sha256(schema_str.encode()).hexdigest()
     
-    if snapshots:
-        latest = snapshots[-1]
+    latest = crud.get_latest_snapshot(db, pipeline_id)
+    
+    if latest:
+        # 1. Schema drift
+        if latest.schema_hash != schema_hash:
+            anom = crud.create_anomaly(
+                db, pipeline_id, 'schema_drift', 'medium',
+                f'Schema changed from {len(latest.columns)} to {len(columns)} columns',
+                {'old_columns': latest.columns, 'new_columns': columns}
+            )
+            detected_anomalies.append(anom.type)
         
-        if latest['schema_hash'] != schema_hash:
-            old_count = len(latest['columns'])
-            new_count = len(columns)
-            
-            detected_anomalies.append({
-                'id': next_anomaly_id,
-                'pipeline_id': pipeline_id,
-                'type': 'schema_drift',
-                'severity': 'medium',
-                'description': f'Schema changed from {old_count} to {new_count} columns',
-                'detected_at': datetime.utcnow().isoformat(),
-                'resolved': None,
-                'details': {
-                    'old_columns': latest['columns'],
-                    'new_columns': columns
-                }
-            })
-            next_anomaly_id += 1
-        
-        # 2. NULL SPIKES
-        if snapshot.column_stats and latest.get('column_stats'):
+        # 2. Null spikes
+        if snapshot.column_stats and latest.column_stats:
             current_stats = {k: v.dict() for k, v in snapshot.column_stats.items()}
-            baseline_stats = latest['column_stats']
-            
-            null_anomalies = null_detector.detect(current_stats, baseline_stats)
+            null_anomalies = null_detector.detect(current_stats, latest.column_stats)
             
             for null_anom in null_anomalies:
-                detected_anomalies.append({
-                    'id': next_anomaly_id,
-                    'pipeline_id': pipeline_id,
-                    'type': null_anom['type'],
-                    'severity': null_anom['severity'],
-                    'description': null_anom['description'],
-                    'detected_at': datetime.utcnow().isoformat(),
-                    'resolved': None,
-                    'details': null_anom
-                })
-                next_anomaly_id += 1
+                anom = crud.create_anomaly(
+                    db, pipeline_id, null_anom['type'], null_anom['severity'],
+                    null_anom['description'], null_anom
+                )
+                detected_anomalies.append(anom.type)
         
-        # 3. ROW COUNT ANOMALIES
-        if snapshot.row_count and latest.get('row_count'):
-            historical = [s['row_count'] for s in snapshots[-7:] if s.get('row_count')]
+        # 3. Row count
+        if snapshot.row_count and latest.row_count:
+            snapshots_list = crud.get_snapshots(db, pipeline_id, 7)
+            historical = [s.row_count for s in snapshots_list if s.row_count]
             
             row_anomalies = row_count_detector.detect(
-                current_count=snapshot.row_count,
-                baseline_count=latest['row_count'],
-                historical_counts=historical if len(historical) >= 3 else None
+                snapshot.row_count, latest.row_count,
+                historical if len(historical) >= 3 else None
             )
             
             for row_anom in row_anomalies:
-                detected_anomalies.append({
-                    'id': next_anomaly_id,
-                    'pipeline_id': pipeline_id,
-                    'type': row_anom['type'],
-                    'severity': row_anom['severity'],
-                    'description': row_anom['description'],
-                    'detected_at': datetime.utcnow().isoformat(),
-                    'resolved': None,
-                    'details': row_anom
-                })
-                next_anomaly_id += 1
+                anom = crud.create_anomaly(
+                    db, pipeline_id, row_anom['type'], row_anom['severity'],
+                    row_anom['description'], row_anom
+                )
+                detected_anomalies.append(anom.type)
         
-        # 4. TYPE MISMATCHES
+        # 4. Type mismatches
         if snapshot.sample_data:
             expected_schema = {col['name']: col['type'] for col in columns}
-            
             type_anomalies = type_detector.detect(expected_schema, snapshot.sample_data)
             
             for type_anom in type_anomalies:
-                detected_anomalies.append({
-                    'id': next_anomaly_id,
-                    'pipeline_id': pipeline_id,
-                    'type': 'type_mismatch',
-                    'severity': type_anom['severity'],
-                    'description': type_anom['description'],
-                    'detected_at': datetime.utcnow().isoformat(),
-                    'resolved': None,
-                    'details': type_anom
-                })
-                next_anomaly_id += 1
+                anom = crud.create_anomaly(
+                    db, pipeline_id, 'type_mismatch', type_anom['severity'],
+                    type_anom['description'], type_anom
+                )
+                detected_anomalies.append(anom.type)
     
-    # Store all anomalies
-    for anom in detected_anomalies:
-        anomalies_db[pipeline_id].append(anom)
-    
-    # Store snapshot
-    snapshot_record = {
-        'id': next_snapshot_id,
-        'pipeline_id': pipeline_id,
-        'schema_hash': schema_hash,
-        'columns': columns,
-        'row_count': snapshot.row_count,
-        'column_stats': {k: v.dict() for k, v in snapshot.column_stats.items()} if snapshot.column_stats else None,
-        'snapshot_time': datetime.utcnow().isoformat()
-    }
-    snapshots_db[pipeline_id].append(snapshot_record)
-    next_snapshot_id += 1
+    # Create snapshot
+    snapshot_record = crud.create_snapshot(
+        db, pipeline_id, schema_hash, columns, snapshot.row_count,
+        {k: v.dict() for k, v in snapshot.column_stats.items()} if snapshot.column_stats else None
+    )
     
     return {
-        'snapshot_id': snapshot_record['id'],
+        'snapshot_id': snapshot_record.id,
         'anomalies_detected': len(detected_anomalies),
-        'anomaly_types': list(set(a['type'] for a in detected_anomalies)),
-        'snapshot_time': snapshot_record['snapshot_time']
+        'anomaly_types': list(set(detected_anomalies)),
+        'snapshot_time': snapshot_record.snapshot_time.isoformat()
     }
 
 
 @app.get('/api/v1/pipelines/{pipeline_id}/anomalies')
-async def get_anomalies(
+async def get_anomalies_endpoint(
     pipeline_id: int,
-    unresolved_only: bool = True
+    unresolved_only: bool = True,
+    db: Session = Depends(get_db)
 ):
-    if pipeline_id not in pipelines_db:
+    pipeline = crud.get_pipeline(db, pipeline_id)
+    if not pipeline:
         raise HTTPException(status_code=404, detail='Pipeline not found')
     
-    anomalies = anomalies_db[pipeline_id]
-    
-    if unresolved_only:
-        anomalies = [a for a in anomalies if a['resolved'] is None]
+    anomalies = crud.get_anomalies(db, pipeline_id, unresolved_only)
     
     return {
-        'anomalies': anomalies,
+        'anomalies': [model_to_dict(a) for a in anomalies],
         'count': len(anomalies)
     }
 
 
 @app.get('/api/v1/pipelines/{pipeline_id}/snapshots')
-async def get_snapshots(pipeline_id: int, limit: int = 10):
-    if pipeline_id not in pipelines_db:
+async def get_snapshots_endpoint(
+    pipeline_id: int,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    pipeline = crud.get_pipeline(db, pipeline_id)
+    if not pipeline:
         raise HTTPException(status_code=404, detail='Pipeline not found')
     
-    snapshots = snapshots_db[pipeline_id][-limit:]
+    snapshots = crud.get_snapshots(db, pipeline_id, limit)
     
     return {
-        'snapshots': snapshots,
+        'snapshots': [model_to_dict(s) for s in snapshots],
         'count': len(snapshots)
     }
 
 
 @app.post('/api/v1/anomalies/{anomaly_id}/propose-fix')
-async def propose_fix(anomaly_id: int):
-    global next_fix_id
-    
+async def propose_fix(anomaly_id: int, db: Session = Depends(get_db)):
     if not fix_generator:
-        raise HTTPException(
-            status_code=503,
-            detail='Fix generation unavailable. OpenAI API key not configured.'
-        )
+        raise HTTPException(status_code=503, detail='Fix generation unavailable')
     
-    anomaly = None
-    for pipeline_id in anomalies_db:
-        for a in anomalies_db[pipeline_id]:
-            if a['id'] == anomaly_id:
-                anomaly = a
-                break
-        if anomaly:
-            break
-    
+    anomaly = crud.get_anomaly(db, anomaly_id)
     if not anomaly:
         raise HTTPException(status_code=404, detail='Anomaly not found')
     
     try:
-        fix_proposal = fix_generator.generate_schema_drift_fix(anomaly)
+        anomaly_dict = model_to_dict(anomaly)
+        fix_proposal = fix_generator.generate_schema_drift_fix(anomaly_dict)
         
-        fix_record = {
-            'id': next_fix_id,
-            'anomaly_id': anomaly_id,
-            'proposed_at': datetime.utcnow().isoformat(),
-            'fix_type': fix_proposal['fix_type'],
-            'root_cause': fix_proposal['root_cause'],
-            'fix_code': fix_proposal['fix_code'],
-            'rollback_plan': fix_proposal['rollback_plan'],
-            'confidence_score': fix_proposal['confidence_score'],
-            'risks': fix_proposal['risks'],
-            'status': 'pending',
-            'applied_at': None
-        }
+        fix_record = crud.create_fix(
+            db, anomaly_id,
+            fix_proposal['fix_type'],
+            fix_proposal['root_cause'],
+            fix_proposal['fix_code'],
+            fix_proposal['rollback_plan'],
+            fix_proposal['confidence_score'],
+            fix_proposal['risks']
+        )
         
-        fixes_db[next_fix_id] = fix_record
-        next_fix_id += 1
+        # Audit log
+        crud.create_audit_log(
+            db, 'propose_fix', 'fix', fix_record.id,
+            {'anomaly_id': anomaly_id, 'confidence': fix_proposal['confidence_score']},
+            'gpt-4', fix_proposal['confidence_score'] / 100.0
+        )
         
-        return fix_record
+        return model_to_dict(fix_record)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Fix generation failed: {str(e)}')
 
 
 @app.get('/api/v1/fixes/{fix_id}')
-async def get_fix(fix_id: int):
-    if fix_id not in fixes_db:
+async def get_fix_endpoint(fix_id: int, db: Session = Depends(get_db)):
+    fix = crud.get_fix(db, fix_id)
+    if not fix:
         raise HTTPException(status_code=404, detail='Fix not found')
-    return fixes_db[fix_id]
+    return model_to_dict(fix)
 
 
 @app.post('/api/v1/fixes/{fix_id}/approve')
-async def approve_fix(fix_id: int):
-    if fix_id not in fixes_db:
+async def approve_fix_endpoint(fix_id: int, db: Session = Depends(get_db)):
+    fix = crud.approve_fix(db, fix_id)
+    if not fix:
         raise HTTPException(status_code=404, detail='Fix not found')
     
-    fix = fixes_db[fix_id]
-    fix['status'] = 'approved'
-    fix['approved_at'] = datetime.utcnow().isoformat()
+    # Audit log
+    crud.create_audit_log(
+        db, 'approve_fix', 'fix', fix_id,
+        {'status': 'approved', 'confidence': fix.confidence_score}
+    )
     
     return {
         'message': 'Fix approved successfully',
@@ -453,14 +377,16 @@ async def approve_fix(fix_id: int):
 
 
 @app.post('/api/v1/fixes/{fix_id}/reject')
-async def reject_fix(fix_id: int, reason: Optional[str] = None):
-    if fix_id not in fixes_db:
+async def reject_fix_endpoint(fix_id: int, reason: Optional[str] = None, db: Session = Depends(get_db)):
+    fix = crud.reject_fix(db, fix_id, reason)
+    if not fix:
         raise HTTPException(status_code=404, detail='Fix not found')
     
-    fix = fixes_db[fix_id]
-    fix['status'] = 'rejected'
-    fix['rejected_at'] = datetime.utcnow().isoformat()
-    fix['rejection_reason'] = reason
+    # Audit log
+    crud.create_audit_log(
+        db, 'reject_fix', 'fix', fix_id,
+        {'status': 'rejected', 'reason': reason}
+    )
     
     return {
         'message': 'Fix rejected',
@@ -470,84 +396,68 @@ async def reject_fix(fix_id: int, reason: Optional[str] = None):
 
 
 @app.get('/api/v1/anomalies/{anomaly_id}/fixes')
-async def get_fixes_for_anomaly(anomaly_id: int):
-    fixes = [fix for fix in fixes_db.values() if fix['anomaly_id'] == anomaly_id]
+async def get_fixes_for_anomaly_endpoint(anomaly_id: int, db: Session = Depends(get_db)):
+    fixes = crud.get_fixes_for_anomaly(db, anomaly_id)
     return {
-        'fixes': fixes,
+        'fixes': [model_to_dict(f) for f in fixes],
         'count': len(fixes)
     }
 
 
 @app.post('/api/v1/anomalies/{anomaly_id}/analyze-multi-agent')
-async def analyze_with_multi_agent(anomaly_id: int):
-    global next_fix_id
-    
+async def analyze_with_multi_agent(anomaly_id: int, db: Session = Depends(get_db)):
     if not orchestrator:
-        raise HTTPException(
-            status_code=503,
-            detail='Multi-agent system unavailable. Check configuration.'
-        )
+        raise HTTPException(status_code=503, detail='Multi-agent system unavailable')
     
-    anomaly = None
-    pipeline_id = None
-    for pid in anomalies_db:
-        for a in anomalies_db[pid]:
-            if a['id'] == anomaly_id:
-                anomaly = a
-                pipeline_id = pid
-                break
-        if anomaly:
-            break
-    
+    anomaly = crud.get_anomaly(db, anomaly_id)
     if not anomaly:
         raise HTTPException(status_code=404, detail='Anomaly not found')
     
+    # Get past fixes from database
+    all_anomalies = db.query(models.Anomaly).all()
     past_fixes = []
-    for pid in anomalies_db:
-        for past_anomaly in anomalies_db[pid]:
-            anomaly_fixes = [f for f in fixes_db.values() if f['anomaly_id'] == past_anomaly['id']]
-            if anomaly_fixes:
-                past_fixes.append({
-                    'anomaly': past_anomaly,
-                    'fix': anomaly_fixes[0]
-                })
+    for past_anom in all_anomalies:
+        fixes = crud.get_fixes_for_anomaly(db, past_anom.id)
+        if fixes:
+            past_fixes.append({
+                'anomaly': model_to_dict(past_anom),
+                'fix': model_to_dict(fixes[0])
+            })
     
     try:
-        result = orchestrator.process_anomaly(anomaly, past_fixes)
+        anomaly_dict = model_to_dict(anomaly)
+        result = orchestrator.process_anomaly(anomaly_dict, past_fixes)
         
         if result.get('proceed_with_fix') and result.get('proposed_fix'):
             fix_data = result['proposed_fix']
             
-            fix_record = {
-                'id': next_fix_id,
-                'anomaly_id': anomaly_id,
-                'proposed_at': datetime.utcnow().isoformat(),
-                'fix_type': fix_data['fix_type'],
-                'root_cause': fix_data['root_cause'],
-                'fix_code': fix_data['fix_code'],
-                'rollback_plan': fix_data['rollback_plan'],
-                'confidence_score': fix_data['confidence_score'],
-                'risks': fix_data['risks'],
-                'status': 'pending',
-                'applied_at': None,
-                'detective_analysis': result.get('detective_analysis'),
-                'critic_validation': result.get('critic_validation'),
-                'final_recommendation': result.get('final_recommendation'),
-                'agent_consensus': result.get('agent_consensus')
-            }
+            fix_record = crud.create_fix(
+                db, anomaly_id,
+                fix_data['fix_type'],
+                fix_data['root_cause'],
+                fix_data['fix_code'],
+                fix_data['rollback_plan'],
+                fix_data['confidence_score'],
+                fix_data['risks'],
+                result.get('detective_analysis'),
+                result.get('critic_validation'),
+                result.get('final_recommendation'),
+                result.get('agent_consensus')
+            )
             
-            fixes_db[next_fix_id] = fix_record
-            next_fix_id += 1
+            # Audit log
+            crud.create_audit_log(
+                db, 'multi_agent_analysis', 'fix', fix_record.id,
+                {'anomaly_id': anomaly_id, 'agents': 'detective-fixer-critic'},
+                'gpt-4-multi-agent', fix_data['confidence_score'] / 100.0
+            )
             
-            result['fix_id'] = fix_record['id']
+            result['fix_id'] = fix_record.id
         
         return result
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f'Multi-agent analysis failed: {str(e)}'
-        )
+        raise HTTPException(status_code=500, detail=f'Multi-agent analysis failed: {str(e)}')
 
 
 @app.get('/api/v1/system/agents/status')
@@ -574,4 +484,18 @@ async def get_detector_status():
             row_count_detector is not None,
             type_detector is not None
         ])
+    }
+
+
+@app.get('/api/v1/audit-logs')
+async def get_audit_logs(
+    entity_type: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    '''Get audit logs for EU AI Act compliance'''
+    logs = crud.get_audit_logs(db, entity_type, limit)
+    return {
+        'logs': [model_to_dict(log) for log in logs],
+        'count': len(logs)
     }
